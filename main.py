@@ -138,6 +138,10 @@ def normalize_block(rows: List[List[str]]) -> List[List[str]]:
     return [r + [""] * (width - len(r)) for r in rows]
 
 
+def block_has_any_data(rows: List[List[str]]) -> bool:
+    return any(any(str(c).strip() for c in r) for r in rows)
+
+
 @retry(
     retry=retry_if_exception_type(Exception),
     wait=wait_exponential(multiplier=1, min=2, max=30),
@@ -158,15 +162,24 @@ def snapshot_once(cfg: Config, gc: gspread.Client) -> None:
     screener_values = normalize_block(screener_values)
     width = len(screener_values[0])
 
+    # --- CHANGE: drop header row from snapshots ---
+    header = screener_values[0]  # kept for clarity (not written)
+    data_rows = screener_values[1:]
+
+    if not data_rows or not block_has_any_data(data_rows):
+        logging.warning("Screener has only header/no data rows; skipping this cycle.")
+        return
+    # ---------------------------------------------
+
     blank_row = [""] * width
-    block = screener_values + [blank_row]  # separated by one empty row
+    block = data_rows + [blank_row]  # separated by one empty row
 
     snapshot_height = len(block)
     max_rows = cfg.max_snapshots * snapshot_height
 
     logging.info(
-        "Snapshotting Screener -> history | rows=%d cols=%d | snapshot_height=%d | cap_rows=%d",
-        len(screener_values), width, snapshot_height, max_rows
+        "Snapshotting Screener (no header) -> history | rows=%d cols=%d | snapshot_height=%d | cap_rows=%d",
+        len(data_rows), width, snapshot_height, max_rows
     )
 
     if cfg.dry_run:
@@ -182,7 +195,10 @@ def snapshot_once(cfg: Config, gc: gspread.Client) -> None:
     if current_len > max_rows:
         start_delete = max_rows + 1
         end_delete = current_len
-        logging.info("Trimming history rows %d..%d to maintain the last %d snapshots.", start_delete, end_delete, cfg.max_snapshots)
+        logging.info(
+            "Trimming history rows %d..%d to maintain the last %d snapshots.",
+            start_delete, end_delete, cfg.max_snapshots
+        )
         ws_history.delete_rows(start_delete, end_delete)
 
 
@@ -204,12 +220,14 @@ def main():
     setup_logging(cfg.log_level)
 
     logging.info("Starting FX Screener History Bot")
-    logging.info("Sheet=%s | Screener=%s | History=%s | Every=%d min | MaxSnapshots=%d | DRY_RUN=%s",
-                 cfg.sheet_id, cfg.screener_tab, cfg.history_tab, cfg.poll_minutes, cfg.max_snapshots, cfg.dry_run)
+    logging.info(
+        "Sheet=%s | Screener=%s | History=%s | Every=%d min | MaxSnapshots=%d | DRY_RUN=%s",
+        cfg.sheet_id, cfg.screener_tab, cfg.history_tab, cfg.poll_minutes, cfg.max_snapshots, cfg.dry_run
+    )
 
     gc = make_gspread_client()
 
-    # align to the next 15-min boundary on startup
+    # align to the next interval boundary on startup
     sleep_to_next_interval(cfg.poll_minutes)
 
     while True:
